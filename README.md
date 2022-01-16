@@ -1,2 +1,2 @@
-# Ecommerce_Customer_Segmentation_and_Sales_Prediction
+# Ecommerce_Customer_Segmentation
 Statistical Learning Project Unsupervised Learning
