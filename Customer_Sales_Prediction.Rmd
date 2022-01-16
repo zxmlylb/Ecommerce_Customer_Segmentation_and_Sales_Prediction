@@ -1,0 +1,256 @@
+---
+title: "Final Project - Predicting Sales for E-Commerce Olist"
+autor: Bo Liu & Steven Shi
+output:
+  html_document:
+    theme: united
+    df_print: paged
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+
+# The After Dataset
+In this project, we will test the efficiency of the "after" part of the Brazilian E-Commerce Public Dataset made at Olist. The whole dataset consists of information of over 100 thousand orders from 2016 to 2018 and we extracted only the only from 2017-2018 as our "after" data and utilized the before model to compare the predicted values and actual values. Again, the ordered dataset is a collection of several subsets that contains information on customer id, product attributes, order status, payments, as well as product and category information. We will combine these subsets in the data-wrangling process to match the order of before the process  
+
+# The New Question
+We aim to explore and predict 2018 sales data using consumer cohorts that were grouped based on their 2017 spending behaviors and product-categories-related data as predictors. Rather than using an unsupervised learning method, we used the customer label that was derived from the "before" section to testify how accurately can the "before" model predicts the sales in the "after session". Specifically, we want to respectively explore how the kNN and random forest models have deteriorated when only partial data was used to train the model. The before and after scenarios beg the question, will the predicted performance of the before model be accurate in the after situation. 
+
+```{r set-up, include=FALSE}
+library(readr)
+library(caret)
+library(ggplot2)
+library(gridExtra)
+library(tidyverse)
+```
+
+# Loading Before Datasets
+In order to save the loading memory when knitting the session, we choose to store the model in the before section and load it directly in the "after part". We also directly download the tagged customer data that was built from the 2017 datasets using the unsupervised method. 
+
+```{r load dataset, message=FALSE, include=FALSE}
+customer <- readr::read_csv("data/olist_customers_dataset.csv")
+geolocation <- readr::read_csv("data/olist_geolocation_dataset.csv")
+ordercustomer <- readr::read_csv("data/olist_orders_dataset.csv")
+orderitem <- readr::read_csv("data/olist_order_items_dataset.csv")
+category <- readr::read_csv("data/olist_products_dataset.csv")
+translation <- readr::read_csv("data/product_category_name_translation.csv")
+```
+
+```{r read customer data}
+#load necessary information from before secession
+customer.segments <- read.csv("./customer_segments.csv") 
+knn.consumer.before <- readRDS("./knn_consumer.rds")
+rf.consumer.before <- readRDS("./rf_consumer.rds")
+```
+
+When we try to attach the order datasets in 2018 with the customer 2017 segmentation information, we realize that those customers who spent in 2017 but did not spend in 2018 show no customer records when merging the order datasets with the 2017 cohort records. This is because when we trained our unsupervised datasets training, we only used the customer information who have had any spending records in 2017. As a result, when we attach the 2017-trained label to order information in 2018, the customers in cohort 1 and cohort 4 do not appear in any of the transaction histories in 2018, resulting in NA values. We conclude that cohort 1 and cohort 4 show no intersection between 2017 and 2018 datasets order history, and these customer cohorts are considered the ones who did not spend any money in 2018.
+
+We mutate the NA value in the datasets to zero because it reflects the true limitation of the "before" unsupervised learning method in customer segmentation if this model encounters any customer that does not have any consumer spending record in 2018. Turning these values into zero corresponds with the fact that these cohorts do not spend any money on our platform in 2018, but does spend money in 2017.
+
+```{r pre-process product data}
+sales.merge <- merge(x = ordercustomer, y = orderitem, by = "order_id", all.x = TRUE) %>% 
+  filter(order_purchase_timestamp >= "2018-01-01 00:00:00" & order_purchase_timestamp <= "2018-12-31 23:59:59") %>% 
+  left_join(customer.segments, by = "customer_id")
+
+sales.bygroup <- sales.merge %>% 
+  filter(order_status != "unavailable") %>% 
+  count(cluster, product_id) %>%
+  filter(!is.na(cluster)) %>% 
+  pivot_wider(names_from = cluster,
+              values_from = n,
+              names_repair = "unique") %>% 
+  mutate_if(is.integer, ~replace(., is.na(.), 0))
+
+colnames(sales.bygroup) <- c("product_id", "two", "three", "five", "six")
+
+product.sales <- sales.merge %>% 
+  group_by(product_id) %>% 
+  summarize(sales = sum(order_item_id)) %>% 
+  arrange(-sales)
+
+product.sales.category <- sales.bygroup %>% 
+  left_join(category, by = "product_id") %>% 
+  left_join(product.sales, by = "product_id") %>% 
+  na.omit()
+
+product.sales.category
+category.sales <- product.sales.category %>% 
+  group_by(product_category_name) %>% 
+  dplyr::summarise(sales= sum(sales), 
+            one = 0,
+            two = sum(two),
+            three = sum(three),
+            four = 0,
+            five = sum(five),
+            six = sum(six),
+            avg.product.length = mean(product_description_lenght),
+            avg.product.photo = mean(product_photos_qty))
+category.sales <- category.sales %>% select(-product_category_name)
+category.sales
+```
+# Compare the two models
+We compare the performance of the two models in the "after" datasets and how their performance has deteriorated from the before data. We can first gain a quick glance at the performance of the two models by using the predict function and calculating the mean error value for each prediction made as compared to their true value. As we can see from the table, again random forests have a better performance on the testing set than the kNN model, there shows a greater discrepancy between the random forest model and knn model, suggesting that the random forest model is more resistant when applying to new unseen datasets than the knn models, and random forest model makes less error when predicting the new datasets. The deteriorated performance for the knn model can be due to the drastic change of the composition of the consumer cohort in 2018. This change in composition is due to the fact that the old customer cohort that was a good predictor in predicting 2017 sales is not available when they do not buy any products in 2018. On the other, those cohorts who does not place any other in 2017, when recalculating their 2018 cohort composition, most of them actually place some orders in cohort 6. This change in the cohort composition (some cohort serves as a strong predictor in 2017 but useless predictor in 2018 while cohort 6 serves as a strong predictor in 2018, but actually useless predictor in 2017) makes the knn model much less accurate in 2018 when it attempts to find its nearest neighbor because any of the 2018 cohorts hardly looks like the cohort data in the 2017 trained model. In contrast, the random forest model, while some of the predictors are missing in 2018 data, they actually played less weighted importance when making a spit in the trees. These varied weighing systems allow for the random forest model to bear more resilience when some less important predictors are missing, whereas all the predictors are equally weighed in the knn model. 
+
+
+```{r run models on test, warning=FALSE, message=FALSE}
+preProcess.test <- preProcess(category.sales, method = 'scale')
+test.scale <- predict(preProcess.test, newdata = category.sales)
+test.data <- test.scale[,2:9]
+
+knn.predicted <- predict(knn.consumer.before, test.data)
+knn.mean.error <- mean(abs(knn.predicted-test.scale$sales))
+
+rf.predicted <- predict(rf.consumer.before, test.data)
+rf.mean.error <- mean(abs(rf.predicted-test.scale$sales))
+
+# calculate mean error
+data.frame(mean.error.knn = knn.mean.error, rf.mean.error = rf.mean.error)
+
+sales.with.knn.predict <- test.scale %>% mutate(predict.sales = knn.predicted)
+sales.with.rf.predict <- test.scale %>% mutate(predict.sales = rf.predicted)
+```
+
+We plot the scaled predicted sales value with the actual scaled sales value and find that both values are skewed smaller than the actual value because most of the points lie on the lower right part relative to the reference line. The reference line represents the perfect prediction if the predicted value is exactly equal to the actual value in the graph. The under-prediction problem is even more apparent when the model is trying to predict the sales of large value, suggesting there is an overall trend. When predicting sales of small numbers in 2018, the random forest can still make a relatively accurate prediction than the knn model, where most predicted values are much higher than actual value across all sales ranges. This graph is also aligned with deteriorated root mean squared error value of the knn model above.
+
+```{r plot predicted with actual}
+model.predicted.before <- read.csv("./model_prediction_before.csv")
+
+p1 <- ggplot() +
+  geom_point(data = sales.with.knn.predict, aes(sales, predict.sales, color='2018')) + 
+  geom_point(data = model.predicted.before, aes(sales, knn.predicted.before, color='2017'))+
+  geom_abline(intercept = 0, slope = 1) +
+  xlab("True Sales") +
+  ylab("Predicted Sales") +
+  ggtitle("Actual vs. Predicted for kNN")
+
+p2 <- ggplot() +
+  geom_point(data = sales.with.rf.predict, aes(sales, predict.sales, color='2018')) + 
+  geom_point(data = model.predicted.before, aes(sales, rf.predicted.before, color='2017')) +
+  geom_abline(intercept = 0, slope = 1) +
+  xlab("True Sales") + 
+  ylab("Predicted Sales") +
+  ggtitle("Actual vs. Predicted for RF")
+
+grid.arrange(p1, p2, nrow=1)
+```
+
+
+# Combine Before & After Dataset
+Finally, we use the combined before and after datasets to build a new model. We adjust the time window in the training datasets to include both the 2017 and 2018 orders.
+
+```{r combine before and after dataset}
+sales.merge <- merge(x = ordercustomer, y = orderitem, by = "order_id", all.x = TRUE) %>% 
+  filter(order_purchase_timestamp >= "2017-01-01 00:00:00" & order_purchase_timestamp <= "2018-12-31 23:59:59") %>% 
+  left_join(customer.segments, by = "customer_id")
+
+sales.bygroup <- sales.merge %>% 
+  filter(order_status != "unavailable") %>% 
+  count(cluster, product_id) %>%
+  filter(!is.na(cluster)) %>% 
+  pivot_wider(names_from = cluster,
+              values_from = n,
+              names_repair = "unique") %>% 
+  mutate_if(is.integer, ~replace(., is.na(.), 0))
+
+colnames(sales.bygroup) <- c("product_id", "one", "two", "three", "four", "five", "six")
+
+product.sales <- sales.merge %>% 
+  group_by(product_id) %>% 
+  summarize(sales = sum(order_item_id)) %>% 
+  arrange(-sales)
+
+product.sales.category <- sales.bygroup %>% 
+  left_join(category, by = "product_id") %>% 
+  left_join(product.sales, by = "product_id") %>% 
+  na.omit()
+
+category.sales <- product.sales.category %>% 
+  group_by(product_category_name) %>% 
+  dplyr::summarise(sales= sum(sales), 
+            one = sum(one),
+            two = sum(two),
+            three = sum(three),
+            four = sum(four),
+            five = sum(five),
+            six = sum(six),
+            avg.product.length = mean(product_description_lenght),
+            avg.product.photo = mean(product_photos_qty))
+
+combine.groups <- category.sales %>% 
+  select(-product_category_name)
+combine.groups
+```
+
+```{r prepare train data for final model}
+preProcess_consumer <- preProcess(combine.groups, method = 'scale')
+train.data <- predict(preProcess_consumer, newdata = combine.groups)
+```
+
+In the before section, we have predicted that the random forest model will perform better than the kNN model in the after case. However, in the after session, we still want to train a kNN model using the previous hyper-parameters. Doing so gives us a baseline to compare our final model with.
+```{r check kNN}
+set.seed(1)
+knn.consumer.after <- caret::train(sales ~ one+two+three+four+five+six+avg.product.length+avg.product.photo, 
+                      data = train.data,
+                      method = "knn",
+                      trControl = trainControl(method = "cv"),
+                      tuneLength = 10)
+knn.consumer.after
+plot(knn.consumer.after, main="Model Accuracies with kNN")
+```
+
+From the description of the kNN model, we can observe that the RMSE error has increased and Rsquared value decreased compare to the before session. This behavior is expected as 2018's data would differ from that of the 2017. We will compare this deterioration to that of the final model in the next session. 
+
+# Fit the Final Model
+We decide to select the random forest as our model to fit the combined data set. The first reason, as discussed above is the fact that we notice random forest performs consistently better than the kNN model for the error in the trained model and when tests against test data. Further, the method by which random forest decides on the final regression value is also ideal in our situation of before and after data. Specifically, random decision forest could correct for the model's tendency to over-fitting the training set. 
+
+As for the tuning hyperparameters, we decided to also adopt the same values used in training the before datasets. A major reason for this decision is the fact that the before random forest model already achieved an R-squared value of 0.9909 with an acceptable error term RMSE 0.2312. Another reason is the nature of customer groups. We suspect that the behavior of different customer groups would not change much in 2018 compared to 2017. While the number of consumers in the cohort might change over the years, grouping their consumer behaviors as a cohort does not change that much. Therefore, a well-performing model in 2017 should also perform relatively well in 2018 when training the model. Our final model is trained as follows:
+
+```{r apply Random Forest}
+set.seed(1)
+rf.consumer.after <- train(sales ~one + two + three + four + five + six + avg.product.length + avg.product.photo,
+      data = train.data,
+      method = "rf",
+      trControl = trainControl(method = "cv"),
+      tuneLength = 20)
+# compare before & after RF model
+rf.consumer.before
+rf.consumer.after
+
+plot(rf.consumer.after, main="Model Accuracies with RF")
+```
+
+As shown in the information of random forest model rf.consumer.after, the final mtry value is chosen at 4. This value is lower than the value 5 for the random forest model in the before section. However, we can also notice that with more data in the training set, the R-squared value for the optimal random forest model decreased from 0.9909 to 0.9867. This is reasonable considering the fact that we have just added another year worse of data, and the inherent variance within the dataset is bound to increase. Despite the small decrease in the Rsquared value, the root-mean-squared error term decreased significantly. By comparing with the deterioration in RMSE and R-squared observed in the kNN model, we conclude that the random forest is a suitable model as it shows less fluctuation when presenting with a new dataset. 
+
+This deterioration could be evidence for the fact that the behaviors of customer groups are quite consistent over the two years span. The high R-squared and low RMSE achieved by our model partly suggest the fact that our six customer groups along the two additional variables related to the product group consist a strong predictor set for our response variable yearly sales. Moreover, this also implies that the six customer groups created by unsupervised learning have successfully described homogeneous customer behavior. We can gain further insights by looking at the variable importance graph below. 
+
+```{r variable importance}
+importance <- varImp(rf.consumer.after, scale = TRUE)
+plot(importance, top = 5, main = "Variable Importance Top5")
+```
+
+From the variable importance plot, we can see that the importance of group six increased significantly compared to the before model, while the importance of group one decreased from first to third. This switch ordering makes sense when we examine the composition of customers in group six. Since group six consists of customers who only spend in 2018 while group one customer only spend in 2017. The difference implies that customers who spend in 2018 have more predictive power on the final sales compared to that of the customers who only spend in 2017. 
+
+Based on the relatively strong predictive power shown by the random forest model on both the training data and previously unseen data given well-divided customer segments, we think future applications of our final model would also generate premising R-squared value and low RMSE when using the kNN model as a benchmark. We think the predictive power, however, would decrease as time goes further away from the training dataset year, 2017. Clearly, this deterioration is caused by the divergence in customer behavior. 
+
+One challenge that Random Forest poses to further application might be its relative opaque decision process. While companies like Olist could use this training model to make reasonable business decisions, the decision parameter might seem like a "black box" process. Thus, it is up to the company to make ethical and responsible business decisions based on the resulting customer segments and their effects on yearly sales. After all, the goal of online marketplace companies like Olist is to make affordable products available to more consumers rather than serving the need of the highest spending customer group. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
