@@ -1,0 +1,378 @@
+---
+title: "Final Project - Predicting Sales for E-Commerce Olist"
+autor: Bo Liu & Steven Shi
+output:
+  html_document:
+    theme: united
+    df_print: paged
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+# The Dataset
+In this project, we will utilize the Brazilian E-Commerce Public Dataset made at Olist. Olist Store is a Brazilian e-commerce marketplace integrator that concentrates the products of all individual sellers to the consumer. Currently, the company has 300 employees, more than 9000 shopkeepers, and 2 million consumers. the dataset has information of over 100 thousand orders from 2016 to 2018. The dataset is a collection of several subsets that contains information on customer location, product attributes, order status, expense, payments, as well as geolocation information. We will combine these subsets in the data-wrangling state. 
+
+# The Research Question
+By taking advantage of these well-organized datasets, we aim to explore and predict yearly sales data using consumer cohorts and product-categories-related data as predictors. Using unsupervised statistics learning algorithms allows us to extract features from the datasets that normal statistical methods might not be able to see. Specifically, we want to first use k-means clustering to divide all consumers into several consumer groups, then explore the relationships between the product sales, their respective consumer groups composition. In the project, we will first use exploratory graphs and geography maps to visualize the inherent consumer cohort structure Then, using the newly created groups as features, we will apply two supervised learning algorithms - kNN and Random Forest - to predict yearly sales. We will also comment on the transferability of our model, after doing some optimization and efficacy evaluation. 
+```{r setup, include=FALSE, warning=FALSE}
+knitr::opts_chunk$set(message = FALSE)
+library(tidyverse)
+library(gridExtra) # grid_arrange
+library(dendextend)
+library(caret) ## rf and knn
+library(ggmap)
+library(readr)
+library(dplyr)
+library(knitr)
+library(corrplot)
+#options(scipen=999) # false scientific notation
+```
+
+# Loading and Merging the datasets
+Since the dataset in our project comes with several relational sub-subsets that shares some common keys, we will first need to merge the dataset. 
+```{r read data, include=FALSE}
+customer <- readr::read_csv("data/olist_customers_dataset.csv")
+geolocation <- readr::read_csv("data/olist_geolocation_dataset.csv")
+ordercustomer <- readr::read_csv("data/olist_orders_dataset.csv")
+orderitem <- readr::read_csv("data/olist_order_items_dataset.csv")
+category <- readr::read_csv("data/olist_products_dataset.csv")
+translation <- readr::read_csv("data/product_category_name_translation.csv")
+```
+
+
+```{r merging datasets}
+order.by.customer <- merge(x=ordercustomer, y=orderitem, by = "order_id", all.x=TRUE) %>% 
+  filter(order_purchase_timestamp >= "2017-01-01 00:00:00" & order_purchase_timestamp <= "2017-12-31 23:59:59") %>% 
+  group_by(customer_id) %>% 
+  summarise(frequency = length(order_id)) %>% 
+  arrange(-frequency)
+
+customer.sales <- merge(x = ordercustomer, y = orderitem, by = "order_id", all.x = TRUE) %>% 
+  filter(order_purchase_timestamp >= "2017-01-01 00:00:00" & order_purchase_timestamp <= "2017-12-31 23:59:59") %>% 
+  group_by(customer_id) %>% 
+  summarise(expense= sum(price))
+
+customer.frequency <- merge(x=customer.sales, y= order.by.customer, by="customer_id", all.x=TRUE)
+
+
+customer.info <- merge(x=customer, y=customer.frequency, by ="customer_id", all= TRUE) %>% 
+  select(customer_id, customer_zip_code_prefix, expense,frequency)  
+
+# fill na values 
+customer.info[is.na(customer.info)] <- 0  
+
+colnames(customer.info) <-  c("customer_id","geolocation_zip_code_prefix", "expense", "frequency")
+
+# creating geolocation information for customers
+latlng <- geolocation %>% 
+  select(geolocation_zip_code_prefix, geolocation_lat, geolocation_lng) %>% 
+  group_by(geolocation_zip_code_prefix) %>% 
+  summarise(geolocation_lat =mean(geolocation_lat),geolocation_lng =mean(geolocation_lng))
+
+customer.hc <- customer.info %>% 
+  mutate(zipcode=factor(geolocation_zip_code_prefix)) %>% 
+  select(customer_id ,geolocation_zip_code_prefix, expense,frequency)
+
+customer.final <- merge(x=customer.hc, y=latlng,  by="geolocation_zip_code_prefix", all.x=TRUE) 
+
+
+head(customer.final)
+```
+We mutate the na value in the datasets to zero because as we merge the customer datasets and order datasets to determine how much a specific customer spend, some customer who has not spend any money when merged will be shown na value. Therefore, this means that this customer has not made any order during the year and thus their expense should be turned into zero.
+
+### Interpreting Customer Clusters
+From the loaded dataset, we are able to obtain information on the orders information related to a specific customer identified by a specific customer_id. Furthermore, we are also able to collect the general geographic location related to a customer. Interesting behaviors can be observed from the dataset. When looking at the first 6 observations of the customer.final data frame, for example, we can see that the same customer frequently buys the same item with a price tag of 89.9. And We could gain some insights on this specific customer id when we know what this item actually is. And by merging the two datasets together we are set up to the dataset for k-means clustering analysis. 
+We now apply the k-means clustering method to divide our consumers into 6 groups. The k-means clustering method aims to partition n observations into k clusters. The method that will use to classify each observation is using the mean of the cluster centroid. We feel like this dataset would be a great opportunity to apply k-means clusters since different customers with similar personal, psychological, social, geographical backgrounds often share similar behavior when they purchase any item. So, instead of treating each customer as an individual we think treating customers as groups will not only generate more meaningful insights but also create more applicable algorithms to predict the sales based on the cohort size. 
+
+```{r hcluster analysis, warning=FALSE, message=FALSE}
+
+random.rows <- sample(1:nrow(customer.final), 50)
+
+
+customer.final[random.rows,] %>% 
+  select(-customer_id ,-geolocation_zip_code_prefix, -geolocation_lng, - geolocation_lat) %>% 
+  scale() %>% 
+  dist() %>% 
+  hclust(method = "average") %>%
+  as.dendrogram() %>% 
+  place_labels(customer.final[random.rows,]$expense, customer.final[random.rows,]$frequency) %>% 
+  color_branches(k = 6) %>%
+  color_labels(k = 6) %>% 
+  set("branches_lwd", 1) %>% 
+  circlize_dendrogram()
+```
+
+
+We will create the 6 consumer groups based on 4 variables: purchase price, purchase frequency, longitude, and latitude. We selected these 4 variables because purchase price and frequency can, to some degree, indicate the purchasing power of the customer. Geography location also justifies similarity in purchasing behavior when it comes to sharing the same culture.
+
+```{r kmeans scale the customer}
+customer.km <- customer.final %>% 
+  select(expense, frequency, geolocation_lat, geolocation_lng) %>% 
+  na.omit() %>%
+  scale()
+```
+
+
+```{r select k values}
+# only run when knit
+ss <- NULL
+
+for(k in 2:8){
+  km <- kmeans(customer.km, centers = k)
+  ss[k] <- km$tot.withinss
+}
+
+plot(ss, 
+     main = "Total Within Sum of Squares vs. K-value")
+```
+
+We set up a loop to check the compactness of each cluster with a different k value. We use total within the sum of squares to evaluate how close within each cluster is to find an optimal k value. As can be seen from the dot plot, with the increase of the k value, the total within ss decreases. This is because as the cluster increases, the variance within each cluster will inevitably decrease. We pick a value of 6 and try to visualize it with a small subset of data using hierarchical clustering to explore some of the consumer behaviors using a  circle dendrogram. We choose this value because it allows a relatively low within ss, but maintains a reasonable number of clustering. From a randomly selected sample, we can visualize that, some customers did not spend money at all, and they constitute a large portion of the customers. Some other consumers spend a moderate amount of money, but with various consuming frequencies. At the same time, only a small portion of the consumer spends a large amount of money on the platform. This small sample of consumer spending pattern is consistent with the composition of the clustering determined by k-means, as shown in the pie chart below.  Cluster 3, which performs a more irrational consuming behavior (with a high level of spending and high-level frequency) only constitutes a small portion of all the customers. 
+
+```{r k means plot}
+set.seed(21)
+
+km <- kmeans(customer.km, centers = 6)
+
+# ajusting the dataframe length
+customer.segments <- customer.final %>%
+  na.omit() %>% 
+  mutate(cluster = km$cluster) 
+```
+
+
+```{r cluster info, include=FALSE}
+customer.map.data <- customer.segments %>% 
+  select(-customer_id, -geolocation_zip_code_prefix) %>% 
+  group_by(cluster) %>% 
+  summarise_all(mean) 
+
+# map chart
+register_google(key = 'AIzaSyBGptV_63rIYt4CAVB4b94YTo8uL2YldpY')
+Brazil.loc <- c(-60, -40, -30, 0)
+
+cluster.map <- get_map(location = Brazil.loc,
+                       source = "google",
+                       maptype = "roadmap",
+                       crop = FALSE,
+                       zoom = 6)
+```
+
+```{r cluster visualization}
+ggmap(cluster.map) + 
+  geom_point(aes(x = geolocation_lng, y = geolocation_lat), 
+             data = customer.map.data,
+             alpha = 0.5,
+             color = 'darkred',
+             size = 6) +
+  geom_text(aes(x = geolocation_lng, y = geolocation_lat, label = cluster),
+            data = customer.map.data, 
+            hjust = 0,
+            vjust = 1.5) +
+  ggtitle("Visualizing 6 Customer Clusters")
+
+customer.map.data
+```
+
+The above visualization of the 6 customer groups is based on the customer clusters calculated by k-means clustering. From the map and the cluster information table, we can develop a few insights about our customer groups. First of all, geography played a major role in how the clusters are being generated. We can see that clusters 2-6 are all coastal cities where most of the customers of the online marketplace came from. We can see cluster 1 is relatively isolated from the other clusters. One reason to explain this is the fact that the capital of Brazil Brasilia is located around the location indicated by cluster 1. So, cluster 1 could indicate that the customer in Brasilia has different purchase preferences. Similarly, we can see other major cities of Brazil being close to the center location of other clusters, specifically Rio De Janeiro close to clusters 2,3, and three major cities Salvador, Recife, and Fortaleza close to cluster 6. 
+
+From an expense and frequency perspective, we can see that group 3, the one close to Rio De Janeiro has the highest purchasing price and frequency. In fact, the magnitude of price for group 3 is much higher than the other groups. On the opposite side of group 3 in group 4 where a little money is spent on products by customers in this group. Group 4 is also located near the populated coastal cities indicating the fact that people in cities buy a lot and browse a lot at the same time. 
+
+
+Next, we combine the product group sales data with the consumer cluster data, so that we can start to investigate the relationship between our response variable yearly sales.
+
+## Examine Product Sales
+
+```{r sales data, warning=FALSE}
+sales.merge <- merge(x = ordercustomer, y = orderitem, by = "order_id", all.x = TRUE) %>% 
+  filter(order_purchase_timestamp >= "2017-01-01 00:00:00" & order_purchase_timestamp <= "2017-12-31 23:59:59",) %>% 
+  left_join(customer.segments, by = "customer_id")
+
+sales.bygroup <- sales.merge %>% 
+  filter(order_status != "unavailable") %>% 
+  count(cluster, product_id) %>% 
+  filter(!is.na(cluster)) %>% 
+  pivot_wider(names_from = cluster,
+              values_from = n,
+              names_repair = "unique") %>% 
+  mutate_if(is.integer, ~replace(., is.na(.), 0))
+
+colnames(sales.bygroup) <- c("product_id","one", "two", "three", "four", "five", "six")
+
+product.sales <- sales.merge %>% 
+  group_by(product_id) %>% 
+  summarize(sales = sum(order_item_id)) %>% 
+  arrange(-sales)
+
+product.sales.category <- sales.bygroup %>% 
+  left_join(category, by = "product_id") %>% 
+  left_join(product.sales, by = "product_id") %>% 
+  na.omit()
+
+category.sales <- product.sales.category %>% 
+  group_by(product_category_name) %>% 
+  dplyr::summarise(sales= sum(sales), 
+            one = sum(one),
+            two = sum(two),
+            three = sum(three),
+            four = sum(four),
+            five = sum(five),
+            six = 0,
+            avg.product.length = mean(product_description_lenght),
+            avg.product.photo = mean(product_photos_qty))
+category.sales %>% arrange(-sales)
+```
+
+```{r pie chart for group composition}
+total <- 1008650
+group_sales <- c(16556,90333,696972,1,27347,8)
+# Create Data
+data.cama <- data.frame(
+  group = c("1", "2", "3", "4", "5", "6"),
+  percentage = group_sales/total
+)
+
+# Basic piechart
+ggplot(data.cama, aes(x="", y=percentage, fill=group)) +
+  geom_bar(stat="identity", width=1, color = "white") +
+  coord_polar("y", start=0) +
+  ggtitle("composition of consumer groups in bed & bath category")
+```
+
+A brief examination of the category.sales dataset shows us the composition of the six consumer groups in a different product category. We also got two additional product category-related data average product description length and the average number of photos of the product. When we arrange product categories by their sales number we can see the category with the most sales is bed & bath (cama_mesa_banho). Further, we can see from the pie chart that customer group 3 made up the majority or 69.1% of the customer for this category, which may speak to one of the preferences of customer group 3. We can also guess that group 3 will compose a majority part of the many product categories since they are the group that buys the more expensive product with higher frequencies. 
+
+Thus, we information on both the consumer and product side ready, we can finally combine the final dataset that will be used to train our supervised learning models. Of course, more data processing is needed before we can train this 72*10 dataset. 
+
+```{r category data}
+category.final <- category.sales %>% 
+  left_join(translation, by = "product_category_name") %>% 
+  arrange(-sales) %>% 
+  select(-product_category_name, -product_category_name_english)
+str(category.final)
+```
+
+# Apply kNN and Random Forest
+## Data Processing
+First, we split the data into two groups: a training set and a test set. To do this we will use the createDataPartition() function in caret package. Compare to traditional data splitting using the sample() method or splitting the dataset by rows, we are able to preserve the proportion of the categories in the response variable, which can be impacted if we sample randomly.
+
+```{r data partition}
+set.seed(218)
+#split training(80%) and test(20%)
+trainRows <- createDataPartition(category.final$sales, p=0.8, list=FALSE)
+consumer.train <- category.final[trainRows,1:9]
+consumer.test <- category.final[-trainRows,1:9]
+```
+
+```{r transform data, include=FALSE}
+preProcess_consumer <- preProcess(consumer.train, method = 'scale')
+train.data <- predict(preProcess_consumer, newdata = consumer.train)
+
+# apply the same transformation for test
+preProcess_consumer <- preProcess(consumer.test, method = 'scale')
+test.data <- predict(preProcess_consumer, newdata = consumer.test)
+```
+
+As evident in the above dataset, different numerical columns have different meanings. While the values in each customer group mean in total sales for each group, the average product length indicates the average number of characters. We, therefore, decide to scale all data columns so that a change of "1" in any numeric features is given the same importance. By scaling the variables, the comparisons between these data values with different types would make more real-world sense.
+
+
+### Investigate PCA
+The PCA method uses Euclidian distances to derive the components. We select all variables except the product english name to perform the transformations. 
+```{r pca analysis}
+consumer.pca <- prcomp(train.data,
+                       scale. = TRUE,
+                       center = TRUE)
+
+summary(consumer.pca)
+train.data
+plot(consumer.pca, type = "lines", main = "Scree plot for PCA")
+```
+From the summary of the PCA model, we can see that the first two PC's explain 76% of the variability. We feel like although PCA could help us reduce data dimensions since the first two components could not explain most of the variability (above 90%), we decide not to use PCA components in our dataset. This decision can be further backed by looking at the scree plot, where the order of magnitude for different principle components only flattens at the 5th component.
+
+
+##kNN
+With the training dataset and testing dataset prepared we can finally train our kNN and Random Forest model. We will use the regression variation of the two models to predict the year sales variable. We use the training method in the caret library to apply both models. 
+
+To evaluate regression performance we will use Root Mean Squared Error (RMSE) and R-Squared. RMSE is calculated as the standard deviation of the prediction errors. By using RMSE we can minimize the overall distance from the regression line to each data points. The lower the RMSE value the more concentrated the data is around the regression line. R-Squared represents the proportion of the variance for a dependent variable that's explained by a variable in the regression model. Therefore, we want to maximize the R-squared value and minimize the RMSE value when tuning for the hyper-parameters of the two regression models. 
+
+```{r fit kNN}
+train.data
+knn.consumer <- caret::train(sales ~ one+two+three+four+five+six+avg.product.length+avg.product.photo, 
+                      data = train.data,
+                      method = "knn",
+                      trControl = trainControl(method = "cv"),
+                      tuneLength = 10)
+knn.consumer
+plot(knn.consumer, main="Model Accuracies with kNN")
+```
+When applying the kNN model, we specified cross-validation(10-fold) as the validation method. From the model summary, we can see the optimal number is 7, as it gives the highest R-squared value and lowest RMSE value among all the number of neighbors tested. We can also see on the model accuracies plot that a minimum RMSE value is achieved when neighbor value is 7. The error would then rise continuously as the number of neighbors increases. 
+
+
+## Apply Random Forest
+We also use the training method is caret library to train the random forest model on the training dataset. We specify cross-validation as a validation method and a tune length of 20 to encourage random forests to try on different split values.
+```{r apply random forest, warning=FALSE}
+rf.consumer <- train(sales ~one + two + three + four + five + six + avg.product.length + avg.product.photo,
+      data = train.data,
+      method = "rf",
+      trControl = trainControl(method = "cv"),
+      tuneLength = 20)
+rf.consumer
+plot(rf.consumer, main="Model Accuracies with RF")
+```
+We can see that through considering RMSE and R-squared values, the optimal randomly selected predictors number is chosen to be 8. The choice is justified when looking at the model accuracies plot for Random Forest. Specifically, the RMSE continuously decreased as we increase the mtry value, and we can see that the value 8 is a local minimum among all values tested. 
+
+We can visualize the importance of each predictor in the following variable importance plot. As shown by the graph, group three is the most important predictor when it comes to predicting the yearly sales value. This makes sense as we explained earlier that group 3 is the customer group that purchase product with the highest price and also buys the most frequently. Obviously, if the more a group 3 customer buys a product the more the product would be sold. Interestingly, we also see customer group 5 listed on this importance chart as customer group 5 is the customers who have zero in both expense and frequency values. One possible explanation for this observation is the way sales, expense, and frequency are calculated. If sales number are added when a customer makes a purchase and do not decrease when the same customer returns the order, then the fact that group 5 have high importance for predicting sales simply indicates that group 5 contains customers who return the product frequently. 
+
+```{r interpret the model}
+importance <- varImp(rf.consumer, scale = TRUE)
+plot(importance, top = 5, main = "Variable Importance Top5")
+```
+
+
+# Compare the two models
+Finally, we can compare the performance of the two models and select the optimal one to apply to future datasets. We can first gain a quick glance at the performance of the two models on the testing set by using the predict function and calculating the mean error value for each prediction made. And, as we can see from the table, random forests have a better performance on the testing set than the kNN model. 
+```{r knn and RF on test dataset}
+sales.test <- test.data[,2:9]
+knn.predicted <- predict(knn.consumer, sales.test)
+knn.mean.error <- mean(abs(predicted-test.data$sales))
+
+rf.predicted <- predict(rf.consumer, sales.test)
+rf.mean.error <- mean(abs(predicted-test.data$sales))
+
+before.error <- data.frame(mean.error.knn = knn.mean.error, rf.mean.error = rf.mean.error)
+write.csv(before.error, "./before_error.csv")
+
+test.with.predict <- test.data %>% mutate(knn.predicted.before = knn.predicted,
+                     rf.predicted.before = rf.predicted)
+write.csv(test.with.predict, "./model_prediction_before.csv")
+```
+
+```{r plot}
+ggplot(sales.with.knn.predict, aes(sales, predict.sales)) +
+  geom_point() + 
+  geom_abline(intercept = 0, slope = 1) +
+  xlab("True Sales") +
+  ylab("Predicted Sales") +
+  ggtitle("Predicted vs. Actual for kNN")
+```
+
+
+```{r compare models}
+models_compare <- resamples(list(RF=rf.consumer, KNN=knn.consumer))
+summary(models_compare)
+```
+Finally, when comparing the two models more formally using the resamples method, we observe that RF outperformed kNN in all evaluation criteria. Therefore, we would use our trained RF model to predict further datasets. The final mean RMSE value is 0.247 which we think is a reasonable value when it comes to predicting something as complex as customer behavior. And hopefully, the decent mean R-squared value of 0.98 with a reasonable 0.93 to 0.99 bound would suggest a strong performance when transferred to new data. In our opinion, even if the new data are collected temporally later, the behavior of customers especially when generalized into groups will not be too different from the customers in the training dataset.
+
+
+```{r export models}
+saveRDS(knn.consumer, "./knn_consumer.rds")
+saveRDS(rf.consumer, "./rf_consumer.rds")
+```
+
+```{r export consumer data}
+customer.segments
+write.csv(customer.segments, "./customer_segments.csv")
+```
+
+
+
+
+
