@@ -1,4 +1,4 @@
-# Ecommerce_Customer_Segmentation
+# Ecommerce_Customer_Cluster_and_Sales
 Statistical Learning Project Unsupervised Learning
 
 #The Dataset In this project, we will utilize the Brazilian E-Commerce Public Dataset made at Olist. Olist Store is a Brazilian e-commerce marketplace integrator that concentrates the products of all individual sellers to the consumer. Currently, the company has 300 employees, more than 9000 shopkeepers, and 2 million consumers. the dataset has information of over 100 thousand orders from 2016 to 2018. The dataset is a collection of several subsets that contains information on customer location, product attributes, order status, expense, payments, as well as geolocation information. We will combine these subsets in the data-wrangling state.
